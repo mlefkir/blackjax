@@ -18,68 +18,79 @@ from fastprogress.fastprogress import progress_bar
 from jax import lax
 from jax.experimental import host_callback
 
+import re
 
-def progress_bar_scan(num_samples, print_rate=None):
-    "Progress bar for a JAX scan"
-    progress_bars = {}
+from jax import lax
+from jax.experimental import host_callback
+from tqdm.auto import tqdm as tqdm_auto
 
-    if print_rate is None:
-        if num_samples > 20:
-            print_rate = int(num_samples / 20)
-        else:
-            print_rate = 1  # if you run the sampler for less than 20 iterations
+_CHAIN_RE = re.compile(r"\d+$")  # e.g. get '3' from 'TFRT_CPU_3'
 
-    def _define_bar(arg, transform, device):
-        progress_bars[0] = progress_bar(range(num_samples))
-        progress_bars[0].update(0)
+def progress_bar_scan(num_samples, num_chains):
+    """Factory that builds a progress bar decorator along
+    with the `set_tqdm_description` and `close_tqdm` functions
+    """
 
-    def _update_bar(arg, transform, device):
-        progress_bars[0].update_bar(arg)
+    if num_samples > 20:
+        print_rate = int(num_samples / 20)
+    else:
+        print_rate = 1
+
+    remainder = num_samples % print_rate
+
+    tqdm_bars = {}
+    finished_chains = []
+    for chain in range(num_chains):
+        tqdm_bars[chain] = tqdm_auto(range(num_samples), position=chain)
+        tqdm_bars[chain].set_description("Compiling.. ", refresh=True)
+
+    def _update_tqdm(arg, transform, device):
+        chain_match = _CHAIN_RE.search(str(device))
+        assert chain_match
+        chain = int(chain_match.group())
+        tqdm_bars[chain].set_description(f"Warmup {chain}", refresh=False)
+        tqdm_bars[chain].update(arg)
+
+    def _close_tqdm(arg, transform, device):
+        chain_match = _CHAIN_RE.search(str(device))
+        assert chain_match
+        chain = int(chain_match.group())
+        tqdm_bars[chain].update(arg)
+        finished_chains.append(chain)
+        if len(finished_chains) == num_chains:
+            for chain in range(num_chains):
+                tqdm_bars[chain].close()
 
     def _update_progress_bar(iter_num):
-        "Updates progress bar of a JAX scan or loop"
+        """Updates tqdm progress bar of a JAX loop only if the iteration number is a multiple of the print_rate
+        Usage: carry = progress_bar((iter_num, print_rate), carry)
+        """
+
         _ = lax.cond(
-            iter_num == 0,
+            iter_num == 1,
             lambda _: host_callback.id_tap(
-                _define_bar, iter_num, result=iter_num, tap_with_device=True
+                _update_tqdm, 0, result=iter_num, tap_with_device=True
+            ),
+            lambda _: iter_num,
+            operand=None,
+        )
+        _ = lax.cond(
+            iter_num % print_rate == 0,
+            lambda _: host_callback.id_tap(
+                _update_tqdm, print_rate, result=iter_num, tap_with_device=True
+            ),
+            lambda _: iter_num,
+            operand=None,
+        )
+        _ = lax.cond(
+            iter_num == num_samples,
+            lambda _: host_callback.id_tap(
+                _close_tqdm, remainder, result=iter_num, tap_with_device=True
             ),
             lambda _: iter_num,
             operand=None,
         )
 
-        _ = lax.cond(
-            # update every multiple of `print_rate` except at the end
-            (iter_num % print_rate == 0),
-            lambda _: host_callback.id_tap(
-                _update_bar, iter_num, result=iter_num, tap_with_device=True
-            ),
-            lambda _: iter_num,
-            operand=None,
-        )
-
-        _ = lax.cond(
-            # update by `remainder`
-            iter_num == num_samples - 1,
-            lambda _: host_callback.id_tap(
-                _update_bar, num_samples, result=iter_num, tap_with_device=True
-            ),
-            lambda _: iter_num,
-            operand=None,
-        )
-
-    def _close_bar(arg, transform, device):
-        progress_bars[0].on_iter_end()
-        print()
-
-    def close_bar(result, iter_num):
-        return lax.cond(
-            iter_num == num_samples - 1,
-            lambda _: host_callback.id_tap(
-                _close_bar, None, result=result, tap_with_device=True
-            ),
-            lambda _: result,
-            operand=None,
-        )
 
     def _progress_bar_scan(func):
         """Decorator that adds a progress bar to `body_fun` used in `lax.scan`.
@@ -92,11 +103,11 @@ def progress_bar_scan(num_samples, print_rate=None):
             if type(x) is tuple:
                 iter_num, *_ = x
             else:
-                iter_num = x
+                iter_num = x   
             _update_progress_bar(iter_num)
             result = func(carry, x)
-            return close_bar(result, iter_num)
+            return result
 
         return wrapper_progress_bar
-
     return _progress_bar_scan
+

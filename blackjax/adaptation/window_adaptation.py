@@ -248,7 +248,7 @@ def window_adaptation(
     is_mass_matrix_diagonal: bool = True,
     initial_step_size: float = 1.0,
     target_acceptance_rate: float = 0.80,
-    progress_bar: bool = False,
+    progress_bar: bool = False,num_chains=1,
     **extra_parameters,
 ) -> AdaptationAlgorithm:
     """Adapt the value of the inverse mass matrix and step size parameters of
@@ -326,7 +326,7 @@ def window_adaptation(
 
         if progress_bar:
             print("Running window adaptation")
-            one_step_ = jax.jit(progress_bar_scan(num_steps)(one_step))
+            one_step_ = jax.jit(progress_bar_scan(num_steps,num_chains=num_chains)(one_step))
         else:
             one_step_ = jax.jit(one_step)
 
