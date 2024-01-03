@@ -20,8 +20,8 @@ import jax.numpy as jnp
 import blackjax.mcmc.hmc as hmc
 import blackjax.mcmc.integrators as integrators
 import blackjax.mcmc.metrics as metrics
-import blackjax.mcmc.proposal as proposal
 from blackjax.base import SamplingAlgorithm
+from blackjax.mcmc.proposal import nonreversible_slice_sampling
 from blackjax.types import ArrayLikeTree, ArrayTree, PRNGKey
 from blackjax.util import generate_gaussian_noise
 
@@ -94,7 +94,6 @@ def build_kernel(
     returns a new state of the chain along with information about the transition.
 
     """
-    sample_proposal = proposal.nonreversible_slice_sampling
 
     def kernel(
         rng_key: PRNGKey,
@@ -143,7 +142,7 @@ def build_kernel(
             kinetic_energy_fn,
             step_size,
             divergence_threshold=divergence_threshold,
-            sample_proposal=sample_proposal,
+            sample_proposal=nonreversible_slice_sampling,
         )
 
         key_momentum, key_noise = jax.random.split(rng_key)
@@ -156,14 +155,16 @@ def build_kernel(
         integrator_state = integrators.IntegratorState(
             position, momentum, logdensity, logdensity_grad
         )
-        proposal, info = proposal_generator(slice, integrator_state)
+        # Note that ghmc use nonreversible_slice_sampling, which overloads the pattern
+        # of SampleProposal and do not actually return the acceptance rate.
+        proposal, info, slice_next = proposal_generator(slice, integrator_state)
         proposal = hmc.flip_momentum(proposal)
         state = GHMCState(
-            proposal.position,
-            proposal.momentum,
-            proposal.logdensity,
-            proposal.logdensity_grad,
-            info.acceptance_rate,
+            position=proposal.position,
+            momentum=proposal.momentum,
+            logdensity=proposal.logdensity,
+            logdensity_grad=proposal.logdensity_grad,
+            slice=slice_next,
         )
 
         return state, info
@@ -286,4 +287,4 @@ class ghmc:
                 delta,
             )
 
-        return SamplingAlgorithm(init_fn, step_fn)  # type: ignore[arg-type]
+        return SamplingAlgorithm(init_fn, step_fn)
